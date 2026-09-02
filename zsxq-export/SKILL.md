@@ -1,24 +1,25 @@
 ---
 name: zsxq-export
-description: 抓取知识星球"大锅饭与小伙伴的进步空间"页面内容，按日期和能量评分过滤后导出为本地原始 markdown 文件（raw）。当用户提到"导出知识星球"、"抓取星球"、"zsxq 导出"、"保存星球帖子"、"知识星球 markdown"时应触发此 skill。
-version: 1.0.0
+description: 抓取知识星球"大锅饭与小伙伴的进步空间"页面内容，按日期过滤后导出为本地原始 markdown 文件（raw）。当用户提到"导出知识星球"、"抓取星球"、"zsxq 导出"、"保存星球帖子"、"知识星球 markdown"时应触发此 skill。
+version: 1.1.0
 allowed-tools: Bash, Read, Write, Glob
 argument-hint: "[日期或日期范围] 例如: 3d、7d、2026-05-01:2026-05-12"
 ---
 
 # 知识星球内容导出（原始数据）
 
-将「大锅饭与小伙伴的进步空间」星球帖子通过 **zsxq API** 直接获取，按日期和能量评分过滤后，保存为本地原始 markdown 文件。**此 skill 只负责抓取和过滤，不做任何总结或浓缩。**
+将「大锅饭与小伙伴的进步空间」星球帖子通过 **zsxq API** 直接获取，按日期过滤后，保存为本地原始 markdown 文件。**此 skill 只负责抓取，不做任何总结或浓缩。默认不按能量评分过滤，保留所有帖子。**
 
 **固定星球地址**：`https://wx.zsxq.com/group/15522441811252`
 **固定星球 ID**：`15522441811252`
 
 ## 前置条件
 
-**用户需提前提供：**
-- 知识星球 `zsxq_access_token`（从浏览器 Cookie 中获取：F12 → Application → Cookies → `https://wx.zsxq.com` → `zsxq_access_token`）
-
-如果用户未提供 token，提示用户：**"请提供 zsxq_access_token（从浏览器 Cookie 中复制），格式为 UUID_UUID"**
+**Token 自动读取：**
+- `zsxq_access_token` 存放在 skill 目录下的 `.env` 文件中：`/Users/melo/src-skills/src-zsxq/me1o-zsxq-dgf/zsxq-export/.env`
+- 脚本会自动从 `.env` 读取 token，**无需用户手动提供**
+- `.env` 文件格式支持：纯 token（`UUID_UUID`）或 `ZSXQ_ACCESS_TOKEN=UUID_UUID`
+- 如果 token 过期，用户需更新 `.env` 文件（从浏览器 Cookie 中获取：F12 → Application → Cookies → `https://wx.zsxq.com` → `zsxq_access_token`）
 
 **不再需要浏览器展开操作**——API 返回的帖子正文是完整的，无需点击"展开全部"。
 
@@ -74,14 +75,22 @@ rm -f /Users/melo/doc-Dgf/zsxq_md/{MMDD}_大锅饭_raw_{start_date}_{end_date}.m
 使用 `/Users/melo/doc-Dgf/zsxq_export.py` 脚本执行导出：
 
 ```bash
-python3 /Users/melo/doc-Dgf/zsxq_export.py "<ACCESS_TOKEN>" --days <N>
+python3 /Users/melo/doc-Dgf/zsxq_export.py --days <N>
 ```
 
 或指定日期范围：
 
 ```bash
-python3 /Users/melo/doc-Dgf/zsxq_export.py "<ACCESS_TOKEN>" --start 2026-05-01 --end 2026-05-05
+python3 /Users/melo/doc-Dgf/zsxq_export.py --start 2026-05-01 --end 2026-05-05
 ```
+
+**默认不过滤评分，保留所有帖子。** 如果用户明确要求按评分过滤，可加 `--min-score <阈值>`：
+
+```bash
+python3 /Users/melo/doc-Dgf/zsxq_export.py --days 3 --min-score 8
+```
+
+> Token 自动从 `.env` 读取，无需传入。如需指定其他 `.env` 路径，可加 `--env-file <路径>`。
 
 **脚本功能说明：**
 - 调用 `https://api.zsxq.com/v2/groups/{group_id}/topics` API 获取帖子
@@ -89,9 +98,10 @@ python3 /Users/melo/doc-Dgf/zsxq_export.py "<ACCESS_TOKEN>" --start 2026-05-01 -
 - 每页 20 条，翻页间隔 2 秒（避免触发限流）
 - 自动解码知识星球自定义 `<e>` 标签（text_bold → **加粗**，hashtag → 标签文本，mention → @用户名）
 - 按日期范围过滤帖子
-- 按能量评分过滤（≥ 8 分保留，< 8 分或无评分过滤掉）
-- 按能量评分降序排序，同评分按时间降序
+- **默认不按能量评分过滤**（保留所有帖子）；仅在指定 `--min-score` 时按评分过滤
+- 按能量评分降序排序（无评分的排最后），同评分按时间降序
 - 提取帖子发布时间戳（MM-DD HH:MM 格式）
+- 提取能量评分（仅用于展示和排序，不用于过滤）
 - 提取标签、附件文件名、评论
 - 生成 markdown 文件，每条帖子标题格式：`## ⭐ {评分}分 | {MM-DD HH:MM} | {标题}`
 
@@ -111,17 +121,16 @@ python3 /Users/melo/doc-Dgf/zsxq_export.py "<ACCESS_TOKEN>" --start 2026-05-01 -
 ### 4. 验证输出
 
 检查生成的 markdown 文件：
-- 确认帖子数量与 API 返回的过滤结果一致
+- 确认帖子数量与 API 返回结果一致
 - 确认帖子正文完整（未被截断）
-- 确认能量评分提取正确
+- 确认能量评分提取正确（用于展示）
 - 确认标签和附件信息完整
 
 ### 5. 输出结果
 
 告知用户：
 - 导出的文件路径（含 raw 标识）
-- 导出的帖子数量（过滤后）
-- 被过滤掉的帖子数量（能量评分 < 8 分或无评分）
+- 导出的帖子数量
 - 日期范围
 - 提示用户可使用 `zsxq-analyse` skill 对 raw 文件进行浓缩总结
 
@@ -136,8 +145,8 @@ python3 /Users/melo/doc-Dgf/zsxq_export.py "<ACCESS_TOKEN>" --start 2026-05-01 -
 - **不再需要浏览器操作**——所有数据通过 API 获取，帖子正文完整无需展开
 - API 有请求频率限制，翻页间隔 2 秒，避免触发 code 1059 限流
 - `end_time` 参数必须使用 ISO 8601 格式并进行 URL 编码（`:` → `%3A`，`+` → `%2B`）
-- 能量评分是该星球的重要内容分级指标，务必准确提取，过滤不可遗漏
+- 能量评分仍然会被提取并显示在标题中（用于排序和参考），但**默认不用于过滤**
 - 星球地址和 ID 固定，无需用户指定
-- **此 skill 只负责抓取和过滤，不做总结**；需要浓缩总结请使用 `zsxq-analyse` skill
-- 如果用户提供的 token 过期，提示用户重新从浏览器 Cookie 中获取
+- **此 skill 只负责抓取，不做总结**；需要浓缩总结请使用 `zsxq-analyse` skill
+- 如果 token 过期（API 返回认证失败），提示用户更新 `.env` 文件中的 token（从浏览器 Cookie 中重新获取）
 - **每次调用必须重新从 API 拉取，不使用已有文件作为缓存**，同一天内多次调用也必须先删除旧文件再重新抓取
