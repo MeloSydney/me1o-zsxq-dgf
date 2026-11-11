@@ -14,6 +14,14 @@ API_BASE = "https://api.zsxq.com/v2/groups"
 OUTPUT_DIR = Path("/Users/melo/doc-Dgf/zsxq_md")
 CST = timezone(timedelta(hours=8))
 
+# Vision OCR 工具路径
+SCRIPT_DIR = Path(__file__).resolve().parent
+VISION_OCR_BIN = SCRIPT_DIR / "vision_ocr"
+IMAGE_DL_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+    "Referer": "https://wx.zsxq.com/",
+}
+
 
 # 默认 .env 路径（存放 zsxq_access_token）
 DEFAULT_ENV_FILE = Path("/Users/melo/src-skills/src-zsxq/me1o-zsxq-dgf/zsxq-export/.env")
@@ -185,6 +193,179 @@ def extract_files(topic: dict) -> list[str]:
     return files
 
 
+def extract_images(topic: dict) -> list[dict]:
+    """提取帖子中的图片信息，返回 [{url, width, height}, ...]"""
+    images = []
+    talk = topic.get("talk", {})
+    for img in talk.get("images", []):
+        original = img.get("original", {})
+        if not original.get("url"):
+            large = img.get("large", {})
+            if not large.get("url"):
+                thumb = img.get("thumbnail", {})
+                url = thumb.get("url", "")
+            else:
+                url = large.get("url", "")
+        else:
+            url = original.get("url", "")
+        if url:
+            images.append({
+                "url": url,
+                "width": original.get("width", 0),
+                "height": original.get("height", 0),
+            })
+    # q&a 帖子中 question 或 answer 也可能有图片
+    question = topic.get("question", {})
+    answer = topic.get("answer", {})
+    for src in [question, answer]:
+        for img in src.get("images", []):
+            original = img.get("original", {})
+            url = original.get("url") or img.get("large", {}).get("url") or img.get("thumbnail", {}).get("url", "")
+            if url:
+                images.append({
+                    "url": url,
+                    "width": original.get("width", 0),
+                    "height": original.get("height", 0),
+                })
+    return images
+
+
+def download_image(url: str, dest: Path) -> bool:
+    """下载图片到本地，返回是否成功"""
+    try:
+        req = urllib.request.Request(url, headers=IMAGE_DL_HEADERS)
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = resp.read()
+            dest.write_bytes(data)
+            return True
+    except Exception as e:
+        print(f"  下载图片失败: {e}", file=sys.stderr)
+        return False
+
+
+def run_vision_ocr(image_path: Path) -> list[str]:
+    """运行 Vision OCR，返回文本行列表"""
+    import subprocess
+    try:
+        result = subprocess.run(
+            [str(VISION_OCR_BIN), str(image_path)],
+            capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode != 0:
+            print(f"  OCR 失败 (exit {result.returncode}): {result.stderr[:200]}", file=sys.stderr)
+            return []
+        lines = [l.strip() for l in result.stdout.strip().split("\n") if l.strip()]
+        return lines
+    except subprocess.TimeoutExpired:
+        print(f"  OCR 超时", file=sys.stderr)
+        return []
+    except Exception as e:
+        print(f"  OCR 异常: {e}", file=sys.stderr)
+        return []
+
+
+def render_ocr_layout(ocr_lines: list[str], grid_width: int = 120) -> str:
+    """
+    将 Vision OCR 输出渲染为空间定位的等宽文本布局。
+    OCR 输出格式: x\ty\ttext (坐标为归一化值 0~1，原点左下)
+    策略：将 x 坐标映射到字符列，按 y 聚类成行后用空格定位，
+    保留原始视觉布局。表格类自然对齐成表格，截图类保留空间关系。
+    """
+    if not ocr_lines:
+        return ""
+
+    entries = []
+    for line in ocr_lines:
+        parts = line.split("\t", 2)
+        if len(parts) != 3:
+            continue
+        try:
+            x = float(parts[0])
+            y = float(parts[1])
+            text = parts[2]
+            entries.append((x, y, text))
+        except ValueError:
+            continue
+
+    if not entries:
+        return ""
+
+    # 按 y 降序排列（y 大 = 图片上方 = 第一行）
+    entries.sort(key=lambda e: -e[1])
+
+    # 聚类成行：y 差值 < 0.02 视为同一行
+    rows = []
+    current_row = [entries[0]]
+    current_y = entries[0][1]
+    for i in range(1, len(entries)):
+        if abs(entries[i][1] - current_y) < 0.02:
+            current_row.append(entries[i])
+        else:
+            rows.append(current_row)
+            current_row = [entries[i]]
+            current_y = entries[i][1]
+    rows.append(current_row)
+
+    # 渲染每行：用空格在字符网格上定位文本
+    output_lines = []
+    for row in rows:
+        row.sort(key=lambda e: e[0])
+        buf = [" "] * grid_width
+        for x, _y, text in row:
+            col = int(x * grid_width)
+            for i, ch in enumerate(text):
+                pos = col + i
+                if 0 <= pos < grid_width:
+                    # 避免覆盖已有字符（非空格）
+                    if buf[pos] == " ":
+                        buf[pos] = ch
+                    else:
+                        # 冲突时用 '·' 分隔或直接拼接
+                        buf[pos] = ch
+        line = "".join(buf).rstrip()
+        if line.strip():
+            output_lines.append(line)
+
+    # 去除尾部空行
+    while output_lines and not output_lines[-1].strip():
+        output_lines.pop()
+
+    return "\n".join(output_lines) if output_lines else ""
+
+
+def ocr_topic_images(topic: dict) -> str:
+    """
+    对帖子中的所有图片执行 OCR，返回 Markdown 格式的 OCR 结果。
+    如果没有图片或 OCR 无结果，返回空字符串。
+    """
+    images = extract_images(topic)
+    if not images:
+        return ""
+
+    if not VISION_OCR_BIN.exists():
+        print(f"  vision_ocr 工具不存在: {VISION_OCR_BIN}", file=sys.stderr)
+        return ""
+
+    import tempfile
+    ocr_parts = []
+    for i, img_info in enumerate(images):
+        url = img_info["url"]
+        ext = ".png"
+        if ".jpg" in url or "format/jpg" in url:
+            ext = ".jpg"
+        tmp_path = Path(tempfile.mktemp(suffix=ext))
+        if not download_image(url, tmp_path):
+            continue
+        ocr_lines = run_vision_ocr(tmp_path)
+        tmp_path.unlink(missing_ok=True)
+        if not ocr_lines:
+            continue
+        layout = render_ocr_layout(ocr_lines)
+        if layout:
+            ocr_parts.append(f"**图片OCR（图{i+1}）**：\n\n```\n{layout}\n```")
+    return "\n\n".join(ocr_parts)
+
+
 def extract_comments(topic: dict) -> list[str]:
     """提取评论"""
     comments = []
@@ -277,6 +458,9 @@ def format_topic(topic: dict) -> dict | None:
     # 提取评论
     comments = extract_comments(topic)
 
+    # 对图片执行 OCR
+    ocr_text = ocr_topic_images(topic)
+
     return {
         "type": ttype,
         "created": created,
@@ -287,6 +471,7 @@ def format_topic(topic: dict) -> dict | None:
         "tags": tags,
         "files": files,
         "comments": comments,
+        "ocr": ocr_text,
     }
 
 
@@ -346,6 +531,10 @@ def generate_markdown(
         if post["files"]:
             lines.append("")
             lines.append(f"**附件**：{', '.join(post['files'])}")
+
+        if post.get("ocr"):
+            lines.append("")
+            lines.append(post["ocr"])
 
         if post["comments"]:
             lines.append("")
